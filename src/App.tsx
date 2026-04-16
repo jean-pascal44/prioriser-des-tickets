@@ -54,6 +54,7 @@ export default function App() {
   const [riskImpact, setRiskImpact] = useState(2);
   const [riskProb, setRiskProb] = useState(2);
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory);
+  const [clearModalOpen, setClearModalOpen] = useState(false);
 
   const { valeurMetier, scoreRisque, finalScore } = useMemo(() => {
     const valeur = critTicket * usageMetier;
@@ -71,6 +72,15 @@ export default function App() {
     }
   }, [history]);
 
+  useEffect(() => {
+    if (!clearModalOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setClearModalOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [clearModalOpen]);
+
   const saveCalculation = () => {
     const ref = ticketRef.trim() || "Ticket sans nom";
     const entry: HistoryEntry = {
@@ -84,15 +94,21 @@ export default function App() {
     setTicketRef("");
   };
 
-  const clearHistory = () => {
-    if (window.confirm("Effacer l'historique des scores ?")) {
-      setHistory([]);
-      try {
-        localStorage.removeItem(STORAGE_KEY);
-      } catch {
-        /* ignore */
-      }
+  const openClearModal = () => {
+    if (history.length === 0) return;
+    setClearModalOpen(true);
+  };
+
+  const closeClearModal = () => setClearModalOpen(false);
+
+  const confirmClearHistory = () => {
+    setHistory([]);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* ignore */
     }
+    setClearModalOpen(false);
   };
 
   return (
@@ -261,8 +277,9 @@ export default function App() {
                 </h3>
                 <button
                   type="button"
-                  onClick={clearHistory}
-                  className="text-[10px] font-bold uppercase text-red-400 hover:text-red-600"
+                  onClick={openClearModal}
+                  disabled={history.length === 0}
+                  className="text-[10px] font-bold uppercase text-red-400 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Effacer tout
                 </button>
@@ -308,6 +325,53 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {clearModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="clear-history-title"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeClearModal();
+          }}
+        >
+          <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
+            <h2 id="clear-history-title" className="text-lg font-semibold text-slate-900">
+              Effacer l&apos;historique ?
+            </h2>
+            <p className="mt-2 text-sm text-slate-600">
+              {history.length === 1 ? (
+                <>
+                  L&apos;entrée enregistrée sera supprimée. Cette action est définitive.
+                </>
+              ) : (
+                <>
+                  Les{" "}
+                  <span className="font-medium tabular-nums text-slate-800">{history.length}</span>{" "}
+                  entrées enregistrées seront supprimées. Cette action est définitive.
+                </>
+              )}
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100"
+                onClick={closeClearModal}
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+                onClick={confirmClearHistory}
+              >
+                Effacer tout
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
