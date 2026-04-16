@@ -1,0 +1,57 @@
+# Publie le dossier dist/ sur GitHub Pages sans commiter le build dans la branche principale.
+# Prérequis côté dépôt : Settings → Pages → Source = GitHub Actions (pas « Deploy from branch »).
+
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Actions JS sur Node 24 (cf. dépréciation Node 20 sur les runners GitHub)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # Dépôt « projet » : site à https://<user>.github.io/<nom-du-repo>/
+      # → le build Vite doit utiliser ce préfixe pour les assets et le routeur.
+      # Exception : dépôt <user>.github.io (site à la racine) → définir VITE_BASE: /
+      - name: Build
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
