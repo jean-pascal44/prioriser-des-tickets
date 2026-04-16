@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  buildTicketRef,
+  guessDefaultJiraColumns,
+  parseCsv,
+} from "./csv";
 
 const STORAGE_KEY = "prio_history";
 const APP_META_KEY = "prio_app_meta";
@@ -197,6 +202,12 @@ const DEFAULT_USAGE = 3;
 const DEFAULT_IMPACT = 2;
 const DEFAULT_PROB = 2;
 
+type JiraImportState = {
+  filteredRows: Record<string, string>[];
+  selectedKeys: string[];
+  index: number;
+};
+
 export default function App() {
   const initialMeta = loadAppMeta();
   const [appTitle, setAppTitle] = useState(initialMeta.title);
@@ -216,6 +227,13 @@ export default function App() {
   const [clearModalOpen, setClearModalOpen] = useState(false);
   const [entryPendingDelete, setEntryPendingDelete] = useState<HistoryEntry | null>(null);
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const [jiraCsvDraft, setJiraCsvDraft] = useState<{
+    headers: string[];
+    rows: Record<string, string>[];
+  } | null>(null);
+  const [jiraColumnKeys, setJiraColumnKeys] = useState<string[]>([]);
+  const [jiraImport, setJiraImport] = useState<JiraImportState | null>(null);
 
   const { valeurMetier, scoreRisque, finalScore } = useMemo(() => {
     const valeur = critTicket * usageMetier;
@@ -225,7 +243,7 @@ export default function App() {
 
   const { label: priorityLabel, scoreClass } = priorityTier(finalScore);
 
-  const isUpdateMode = selectedEntryId !== null;
+  const isUpdateMode = selectedEntryId !== null && jiraImport === null;
 
   const resetFormToNew = useCallback(() => {
     setSelectedEntryId(null);
@@ -234,6 +252,16 @@ export default function App() {
     setUsageMetier(DEFAULT_USAGE);
     setRiskImpact(DEFAULT_IMPACT);
     setRiskProb(DEFAULT_PROB);
+  }, []);
+
+  const exitJiraImport = useCallback(() => {
+    setJiraImport(null);
+    setTicketRef("");
+    setCritTicket(DEFAULT_CRIT);
+    setUsageMetier(DEFAULT_USAGE);
+    setRiskImpact(DEFAULT_IMPACT);
+    setRiskProb(DEFAULT_PROB);
+    setSelectedEntryId(null);
   }, []);
 
   useEffect(() => {
@@ -260,7 +288,15 @@ export default function App() {
   }, [appTitle, appDescription]);
 
   useEffect(() => {
-    if (!clearModalOpen && !selectedEntryId && !entryPendingDelete && !headerModalOpen) return;
+    if (
+      !clearModalOpen &&
+      !selectedEntryId &&
+      !entryPendingDelete &&
+      !headerModalOpen &&
+      !jiraCsvDraft &&
+      !jiraImport
+    )
+      return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (entryPendingDelete) {
@@ -275,11 +311,28 @@ export default function App() {
         setHeaderModalOpen(false);
         return;
       }
+      if (jiraCsvDraft) {
+        setJiraCsvDraft(null);
+        return;
+      }
+      if (jiraImport) {
+        exitJiraImport();
+        return;
+      }
       resetFormToNew();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [clearModalOpen, selectedEntryId, entryPendingDelete, headerModalOpen, resetFormToNew]);
+  }, [
+    clearModalOpen,
+    selectedEntryId,
+    entryPendingDelete,
+    headerModalOpen,
+    jiraCsvDraft,
+    jiraImport,
+    exitJiraImport,
+    resetFormToNew,
+  ]);
 
   const applyEntryToForm = (entry: HistoryEntry) => {
     setTicketRef(entry.ref);
@@ -290,6 +343,7 @@ export default function App() {
   };
 
   const selectHistoryRow = (entry: HistoryEntry) => {
+    if (jiraImport) return;
     if (selectedEntryId === entry.id) {
       resetFormToNew();
       return;
@@ -342,6 +396,24 @@ export default function App() {
       };
       setHistory((h) => [...h, entry].sort((a, b) => b.total - a.total));
     }
+
+    if (jiraImport && !selectedEntryId) {
+      const nextIdx = jiraImport.index + 1;
+      if (nextIdx < jiraImport.filteredRows.length) {
+        setJiraImport({ ...jiraImport, index: nextIdx });
+        setTicketRef(
+          buildTicketRef(jiraImport.filteredRows[nextIdx], jiraImport.selectedKeys),
+        );
+        setCritTicket(DEFAULT_CRIT);
+        setUsageMetier(DEFAULT_USAGE);
+        setRiskImpact(DEFAULT_IMPACT);
+        setRiskProb(DEFAULT_PROB);
+        setSelectedEntryId(null);
+        return;
+      }
+      setJiraImport(null);
+    }
+
     setTicketRef("");
     setCritTicket(DEFAULT_CRIT);
     setUsageMetier(DEFAULT_USAGE);
@@ -395,6 +467,64 @@ export default function App() {
     setHeaderModalOpen(false);
   };
 
+  const onCsvFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const { headers, rows } = parseCsv(text);
+      if (headers.length === 0) {
+        window.alert("Fichier CSV vide ou illisible.");
+        return;
+      }
+      const guess = guessDefaultJiraColumns(headers);
+      setJiraColumnKeys(guess.length > 0 ? guess : [headers[0]]);
+      setJiraCsvDraft({ headers, rows });
+    } catch {
+      window.alert("Impossible de lire ce fichier.");
+    }
+  };
+
+  const toggleJiraColumn = (key: string) => {
+    setJiraColumnKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
+  };
+
+  const startJiraReview = () => {
+    if (!jiraCsvDraft || jiraColumnKeys.length === 0) return;
+    const { rows } = jiraCsvDraft;
+    const keys = jiraColumnKeys;
+    const filtered = rows.filter((r) => buildTicketRef(r, keys).length > 0);
+    if (filtered.length === 0) {
+      window.alert("Aucune ligne avec une valeur dans les colonnes choisies.");
+      return;
+    }
+    setJiraImport({ filteredRows: filtered, selectedKeys: keys, index: 0 });
+    setTicketRef(buildTicketRef(filtered[0], keys));
+    setCritTicket(DEFAULT_CRIT);
+    setUsageMetier(DEFAULT_USAGE);
+    setRiskImpact(DEFAULT_IMPACT);
+    setRiskProb(DEFAULT_PROB);
+    setSelectedEntryId(null);
+    setJiraCsvDraft(null);
+  };
+
+  const goJiraPrev = () => {
+    if (!jiraImport || jiraImport.index <= 0) return;
+    const idx = jiraImport.index - 1;
+    setJiraImport({ ...jiraImport, index: idx });
+    setTicketRef(buildTicketRef(jiraImport.filteredRows[idx], jiraImport.selectedKeys));
+  };
+
+  const goJiraNext = () => {
+    if (!jiraImport || jiraImport.index >= jiraImport.filteredRows.length - 1) return;
+    const idx = jiraImport.index + 1;
+    setJiraImport({ ...jiraImport, index: idx });
+    setTicketRef(buildTicketRef(jiraImport.filteredRows[idx], jiraImport.selectedKeys));
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 p-4 font-sans md:p-8">
       <div className="mx-auto max-w-6xl">
@@ -430,13 +560,70 @@ export default function App() {
             </div>
             <p className="mt-1 italic text-slate-500">{appDescription}</p>
           </div>
-          <div className="shrink-0 rounded-lg border bg-white px-4 py-2 shadow-sm">
-            <span className="block text-2xl font-bold text-blue-600">{history.length}</span>
-            <span className="block text-xs font-bold uppercase tracking-tighter text-slate-400">
-              Tickets Évalués
-            </span>
+          <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row sm:items-stretch">
+            <input
+              ref={csvInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="sr-only"
+              onChange={onCsvFile}
+              aria-hidden
+            />
+            <button
+              type="button"
+              onClick={() => csvInputRef.current?.click()}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold uppercase tracking-tight text-slate-700 shadow-sm transition hover:bg-slate-50"
+            >
+              Importer CSV Jira
+            </button>
+            <div className="rounded-lg border bg-white px-4 py-2 text-center shadow-sm">
+              <span className="block text-2xl font-bold text-blue-600">{history.length}</span>
+              <span className="block text-xs font-bold uppercase tracking-tighter text-slate-400">
+                Tickets Évalués
+              </span>
+            </div>
           </div>
         </header>
+
+        {jiraImport && (
+          <div
+            className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-slate-800 shadow-sm"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="font-semibold">
+              Revue import Jira — ticket{" "}
+              <span className="tabular-nums">
+                {jiraImport.index + 1} / {jiraImport.filteredRows.length}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={goJiraPrev}
+                disabled={jiraImport.index <= 0}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold uppercase text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Précédent
+              </button>
+              <button
+                type="button"
+                onClick={goJiraNext}
+                disabled={jiraImport.index >= jiraImport.filteredRows.length - 1}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold uppercase text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Suivant
+              </button>
+              <button
+                type="button"
+                onClick={exitJiraImport}
+                className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-bold uppercase text-red-700 shadow-sm hover:bg-red-50"
+              >
+                Quitter l&apos;import
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
           <div className="space-y-6 lg:col-span-5">
@@ -744,18 +931,24 @@ export default function App() {
                   <tbody className="divide-y divide-slate-100">
                     {history.map((item, index) => {
                       const selected = selectedEntryId === item.id;
+                      const historyLocked = Boolean(jiraImport);
                       return (
                         <tr
                           key={item.id}
-                          role="button"
-                          tabIndex={0}
-                          aria-pressed={selected}
+                          role={historyLocked ? undefined : "button"}
+                          tabIndex={historyLocked ? -1 : 0}
+                          aria-pressed={historyLocked ? undefined : selected}
+                          aria-disabled={historyLocked || undefined}
                           onClick={() => selectHistoryRow(item)}
                           onKeyDown={(e) => onRowKeyDown(e, item)}
-                          className={`cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset ${
-                            selected
-                              ? "bg-blue-50 hover:bg-blue-50/90"
-                              : "hover:bg-slate-50"
+                          className={`transition outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset ${
+                            historyLocked
+                              ? "cursor-not-allowed opacity-50"
+                              : `cursor-pointer ${
+                                  selected
+                                    ? "bg-blue-50 hover:bg-blue-50/90"
+                                    : "hover:bg-slate-50"
+                                }`
                           }`}
                         >
                           <td className="px-4 py-4 text-center font-bold text-slate-400">
@@ -956,6 +1149,67 @@ export default function App() {
                 onClick={confirmClearHistory}
               >
                 Effacer tout
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {jiraCsvDraft && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="jira-csv-title"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setJiraCsvDraft(null);
+          }}
+        >
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
+            <h2 id="jira-csv-title" className="text-lg font-semibold text-slate-900">
+              Colonnes pour la référence / titre
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Cochez une ou plusieurs colonnes (ex. clé + résumé). Elles seront jointes avec « — ».
+            </p>
+            <ul className="mt-4 max-h-48 space-y-2 overflow-y-auto rounded-xl border border-slate-100 p-3">
+              {jiraCsvDraft.headers.map((h) => (
+                <li key={h}>
+                  <label className="flex cursor-pointer items-start gap-2 text-sm text-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={jiraColumnKeys.includes(h)}
+                      onChange={() => toggleJiraColumn(h)}
+                      className="mt-0.5 rounded border-slate-300"
+                    />
+                    <span className="font-medium">{h}</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-4 rounded-xl bg-slate-50 p-3 text-sm">
+              <p className="text-[10px] font-black uppercase text-slate-400">Aperçu (1re ligne)</p>
+              <p className="mt-1 break-words text-slate-800">
+                {jiraCsvDraft.rows[0]
+                  ? buildTicketRef(jiraCsvDraft.rows[0], jiraColumnKeys) || "(vide)"
+                  : "Aucune ligne de données"}
+              </p>
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100"
+                onClick={() => setJiraCsvDraft(null)}
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={jiraColumnKeys.length === 0}
+                onClick={startJiraReview}
+              >
+                Démarrer la revue
               </button>
             </div>
           </div>
